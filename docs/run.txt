@@ -1,0 +1,28 @@
+# 智谱 Embedding-3 向量化（必须设置，否则选择智谱会 400 未找到服务）
+export ZHIPU_API_KEY="1a4e31a96fde730ac18e45f1fc510fb0.Lepk6R7tjeTRpdfh"
+# 对话/LLM 使用 DeepSeek
+export OPENAI_API_KEY="sk-169e9bed4d2b4c1fab95464e34debfa7"
+export OPENAI_BASE_URL="https://api.deepseek.com/v1"
+export OPENAI_MODEL="deepseek-chat"
+export MINE_API_AUTH_ENABLED=false
+export MINE_DATASOURCES='[
+  {
+    "source_id":"oracle_demo",
+    "source_type":"oracle",
+    "options":{
+      "user":"hr",
+      "password":"hr",
+      "host":"localhost",
+      "port":1521,
+      "service_name":"XE"
+    }
+  }
+]'
+uvicorn --factory mine_agent.api.fastapi.app:create_app --host 0.0.0.0 --port 8000 --reload
+
+
+
+
+cd mine
+export ZHIPU_API_KEY="1a4e31a96fde730ac18e45f1fc510fb0.Lepk6R7tjeTRpdfh"
+python3 test_zhipu_embedding.py
