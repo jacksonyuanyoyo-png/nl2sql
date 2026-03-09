@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,12 @@ class ChatResponse(BaseModel):
 
     assistant_content: str = Field(..., description="Assistant reply content")
     tool_outputs: List[str] = Field(default_factory=list, description="Tool execution outputs")
+    # Chat Trace Visibility: optional debug/trace fields, backward compatible
+    trace_id: Optional[str] = Field(default=None, description="Request trace identifier")
+    trace: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Debug trace: retrieval, llm_rounds, tool_results from build_chat_knowledge_context and orchestrator.chat",
+    )
 
 
 class HealthResponse(BaseModel):

@@ -43,6 +43,15 @@ class InMemoryVectorStore(VectorStore):
         vector: List[float],
         top_k: int,
     ) -> List[Tuple[str, Dict[str, Any]]]:
+        scored = self.search_with_score(namespace, vector, top_k)
+        return [(cid, meta) for cid, meta, _ in scored]
+
+    def search_with_score(
+        self,
+        namespace: str,
+        vector: List[float],
+        top_k: int,
+    ) -> List[Tuple[str, Dict[str, Any], float]]:
         if namespace not in self._store or not vector:
             return []
 
@@ -51,7 +60,7 @@ class InMemoryVectorStore(VectorStore):
             for vid, (vec, meta) in self._store[namespace].items()
         ]
         items.sort(key=lambda x: x[1], reverse=True)
-        return [(vid, meta) for vid, _, meta in items[:top_k]]
+        return [(vid, meta, score) for vid, score, meta in items[:top_k]]
 
     def delete_namespace(self, namespace: str) -> None:
         if namespace in self._store:

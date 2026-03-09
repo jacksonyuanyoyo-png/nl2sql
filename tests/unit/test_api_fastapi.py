@@ -131,9 +131,11 @@ def test_chat_forbidden_with_invalid_token() -> None:
 
 
 def test_chat_orchestrator_missing_returns_503() -> None:
+    """无 orchestrator 且 router 无数据源时返回 503。"""
     app = create_app(
         orchestrator=None,
         settings=AppSettings(api_auth_enabled=True, api_tokens=["token-1"]),
+        router=DataSourceRouter(),  # 空 router，避免从 env 注入 orchestrator
     )
     client = TestClient(app)
     resp = client.post(
@@ -192,6 +194,54 @@ def test_chat_smoke() -> None:
     assert "tool_outputs" in data
     assert isinstance(data["tool_outputs"], list)
     assert resp.headers["X-Trace-Id"] == "trace-test-1"
+    # Chat Trace Visibility: trace_id、trace 字段（可选，有 retrieval 时存在）
+    assert data.get("trace_id") == "trace-test-1"
+    if data.get("trace") is not None:
+        assert isinstance(data["trace"], dict)
+        if "retrieval" in data["trace"]:
+            rt = data["trace"]["retrieval"]
+            assert "retrieved_chunks" in rt
+            assert "table_count" in rt
+            assert "join_count" in rt
+
+
+def test_chat_v1_returns_trace_field_when_source_id_provided() -> None:
+    """POST /v1/chat 含 metadata.source_id 时，响应含 trace.retrieval。"""
+    from mine_agent.integrations.oracle import client as oracle_client
+
+    with patch.object(oracle_client, "_ensure_driver"), patch.object(
+        oracle_client,
+        "_execute_query_sync",
+        return_value=oracle_client.QueryResult(
+            columns=["value"], rows=[{"value": 1}], row_count=1
+        ),
+    ):
+        app = create_app(
+            orchestrator=None,
+            settings=AppSettings(api_auth_enabled=False),
+            router=None,
+        )
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/chat",
+            json={
+                "conversation_id": "trace-conv",
+                "user_message": "查员工",
+                "metadata": {"source_id": "oracle_demo"},
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "assistant_content" in data
+    # Chat Trace Visibility: trace 含 retrieval
+    assert "trace" in data
+    trace = data["trace"]
+    assert trace is not None
+    assert "retrieval" in trace
+    rt = trace["retrieval"]
+    assert "retrieved_chunks" in rt
+    assert "table_count" in rt
+    assert "join_count" in rt
 
 
 def test_create_app_auto_injects_orchestrator_from_env(monkeypatch) -> None:
@@ -270,6 +320,70 @@ def test_legacy_health_endpoint() -> None:
     assert resp.json() == {"status": "ok"}
 
 
+def test_chat_returns_trace_when_agent1_agent2_provide_it() -> None:
+    """POST /v1/chat returns trace when build_chat_knowledge_context and orchestrator.chat provide it."""
+    from mine_agent.integrations.oracle import client as oracle_client
+
+    retrieval_trace = {"chunk_ids": ["t1", "t2"], "source_id": "oracle_demo"}
+    llm_rounds = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "Hello"}]
+    tool_results = [{"tool": "query_data", "output": "1 row"}]
+
+    with patch.object(oracle_client, "_ensure_driver"):
+        router = DataSourceRouter()
+        router.register(
+            OracleDataSource(
+                source_id="oracle_demo",
+                connection_options={"dsn": "oracle-host:1521/ORCL"},
+            )
+        )
+        registry = ToolRegistry()
+        registry.register(QueryDataTool(router=router))
+        orch = Orchestrator(
+            llm_service=MockLlmService(),
+            tool_registry=registry,
+            conversation_store=InMemoryConversationStore(),
+        )
+
+    async def _chat_with_trace(*, conversation_id, user_message, user_id, preferred_source_id, schema_context):
+        return {
+            "assistant_content": "Done",
+            "tool_outputs": ["query ran"],
+            "llm_rounds": llm_rounds,
+            "tool_results": tool_results,
+        }
+
+    from mine_agent.api.fastapi import app as app_mod
+
+    async def _build_with_trace(*, source_id, user_message, embedding_service, vector_store, top_k=8):
+        return ("## Schema\nEMPTY", retrieval_trace)
+
+    with patch.object(orch, "chat", side_effect=_chat_with_trace), patch.object(
+        app_mod, "build_chat_knowledge_context", side_effect=_build_with_trace
+    ):
+        app = create_app(
+            orchestrator=orch,
+            settings=AppSettings(api_auth_enabled=False),
+            router=router,
+        )
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/chat",
+            json={
+                "conversation_id": "test-conv",
+                "user_message": "SELECT 1",
+                "metadata": {"source_id": "oracle_demo"},
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["assistant_content"] == "Done"
+    assert data["tool_outputs"] == ["query ran"]
+    assert data.get("trace") is not None
+    assert data["trace"]["retrieval"] == retrieval_trace
+    assert data["trace"]["llm_rounds"] == llm_rounds
+    assert data["trace"]["tool_results"] == tool_results
+
+
 def test_legacy_chat_poll_endpoint(monkeypatch) -> None:
     monkeypatch.setenv(
         "MINE_DATASOURCES",
@@ -339,3 +453,16 @@ def test_legacy_chat_sse_endpoint(monkeypatch) -> None:
     assert resp.status_code == 200
     assert "data: " in resp.text
     assert "[DONE]" in resp.text
+    # Chat Trace Visibility: SSE chunk 可含 debug/trace（若实现）
+    import json as json_mod
+    lines = [ln for ln in resp.text.split("\n") if ln.startswith("data: ") and ln != "data: [DONE]"]
+    if lines:
+        payload = json_mod.loads(lines[0][6:])  # strip "data: "
+        if "debug" in payload:
+            assert isinstance(payload["debug"], dict)
+            if "retrieval" in payload["debug"]:
+                assert "retrieved_chunks" in payload["debug"]["retrieval"]
+            if "llm_rounds" in payload["debug"]:
+                assert isinstance(payload["debug"]["llm_rounds"], list)
+            if "tool_results" in payload["debug"]:
+                assert isinstance(payload["debug"]["tool_results"], list)

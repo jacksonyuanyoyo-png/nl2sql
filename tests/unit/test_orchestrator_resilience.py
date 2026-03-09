@@ -337,3 +337,7 @@ async def test_greeting_turn_also_uses_tool_choice_none() -> None:
     assert llm.requests
     assert llm.requests[0].tool_choice is None
     assert result["assistant_content"] == "done"
+    assert "llm_rounds" in result
+    assert "tool_results" in result
+    assert len(result["llm_rounds"]) >= 1
+    assert any(r["is_final"] for r in result["llm_rounds"])

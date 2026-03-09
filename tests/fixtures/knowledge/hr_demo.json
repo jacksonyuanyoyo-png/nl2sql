@@ -1,0 +1,35 @@
+{
+  "tables": [
+    {
+      "name": "employees",
+      "description": "员工表",
+      "columns": [
+        {"name": "employee_id", "type": "NUMBER", "description": "员工ID"},
+        {"name": "name", "type": "VARCHAR2", "description": "姓名"},
+        {"name": "department_id", "type": "NUMBER", "description": "部门ID"}
+      ]
+    },
+    {
+      "name": "departments",
+      "description": "部门表",
+      "columns": [
+        {"name": "department_id", "type": "NUMBER", "description": "部门ID"},
+        {"name": "name", "type": "VARCHAR2", "description": "部门名称"}
+      ]
+    }
+  ],
+  "join_paths": [
+    {
+      "from": {"table": "employees", "column": "department_id"},
+      "to": {"table": "departments", "column": "department_id"},
+      "description": "employees.department_id -> departments.department_id，表示员工归属部门"
+    }
+  ],
+  "er_graph": {
+    "nodes": [
+      {"table": "employees", "group": "HR"},
+      {"table": "departments", "group": "HR"}
+    ],
+    "edges": []
+  }
+}

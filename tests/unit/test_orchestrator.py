@@ -42,3 +42,14 @@ async def test_orchestrator_executes_query_tool() -> None:
         )
     assert "assistant_content" in result
     assert len(result["tool_outputs"]) == 1
+    assert "llm_rounds" in result
+    assert "tool_results" in result
+    assert len(result["llm_rounds"]) >= 1
+    assert any(r["is_final"] for r in result["llm_rounds"])
+    assert len(result["tool_results"]) == 1
+    tr = result["tool_results"][0]
+    assert tr["tool_name"] == "query_data"
+    assert "arguments" in tr
+    assert "content" in tr
+    assert "metadata_summary" in tr
+    assert "error" in tr

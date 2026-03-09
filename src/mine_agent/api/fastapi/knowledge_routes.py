@@ -391,7 +391,7 @@ async def vectorize_knowledge(
     if not chunks:
         return {"status": "ok", "chunks_embedded": 0, "vendor": vendor, "model": model}
 
-    texts = [t for _, t in chunks]
+    texts = [c.text for c in chunks]
     try:
         vectors = await asyncio.to_thread(embedding_svc.embed, texts)
     except Exception as e:
@@ -416,15 +416,21 @@ async def vectorize_knowledge(
     except Exception:
         pass
 
-    for (chunk_id, chunk_text), vec in zip(chunks, vectors):
+    for chunk, vec in zip(chunks, vectors):
+        chunk_meta = chunk.metadata
         vector_store.add(
             namespace=namespace,
-            id=chunk_id,
+            id=chunk.chunk_id,
             vector=vec,
             metadata={
                 "source_id": source_id,
-                "chunk_id": chunk_id,
-                "text": chunk_text,
+                "chunk_id": chunk.chunk_id,
+                "text": chunk.text,
+                "chunk_type": chunk_meta.get("chunk_type", ""),
+                "table_refs": chunk_meta.get("table_refs", []),
+                "column_refs": chunk_meta.get("column_refs", []),
+                "keywords": chunk_meta.get("keywords", []),
+                "priority": chunk_meta.get("priority", 0),
             },
         )
 

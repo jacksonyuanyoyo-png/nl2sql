@@ -43,7 +43,10 @@ from mine_agent.api.fastapi.datasources_config import (
     connection_to_datasource_config,
     load_connections,
 )
-from mine_agent.api.fastapi.knowledge_context import build_chat_knowledge_context
+from mine_agent.api.fastapi.knowledge_context import (
+    build_chat_knowledge_context,
+    ChatContextResult,
+)
 from mine_agent.api.fastapi.knowledge_store import load_embedding_config
 from mine_agent.api.fastapi.knowledge_routes import router as knowledge_router
 from mine_agent.core.embedding.base import EmbeddingService
@@ -142,13 +145,43 @@ def _build_simple_chunk(
     text: str,
     conversation_id: str,
     request_id: str,
+    debug: dict | None = None,
 ) -> dict:
-    return {
+    chunk: dict = {
         "type": "assistant_message_chunk",
         "conversation_id": conversation_id,
         "request_id": request_id,
         "simple": {"type": "text", "text": text},
     }
+    if debug is not None:
+        chunk["debug"] = debug
+    return chunk
+
+
+def _unpack_knowledge_context(raw) -> tuple[str, dict | None]:
+    """Unpack build_chat_knowledge_context result. ChatContextResult | (context_str, retrieval_trace) | str."""
+    if hasattr(raw, "prompt_context") and hasattr(raw, "retrieval_trace"):
+        return raw.prompt_context, raw.retrieval_trace
+    if isinstance(raw, tuple) and len(raw) >= 2:
+        return str(raw[0]), raw[1] if raw[1] is not None else None
+    return str(raw) if raw else "", None
+
+
+def _build_trace(
+    *,
+    retrieval_trace: dict | None = None,
+    result: dict | None = None,
+) -> dict | None:
+    """Build trace dict from retrieval_trace and orchestrator.chat result (Agent2: llm_rounds, tool_results)."""
+    out: dict = {}
+    if retrieval_trace is not None:
+        out["retrieval"] = retrieval_trace
+    if result is not None:
+        if "llm_rounds" in result and result["llm_rounds"] is not None:
+            out["llm_rounds"] = result["llm_rounds"]
+        if "tool_results" in result and result["tool_results"] is not None:
+            out["tool_results"] = result["tool_results"]
+    return out if out else None
 
 
 def create_app(
@@ -340,12 +373,14 @@ def create_app(
                 embedding_service = getattr(app.state, "embedding_services", {}).get(
                     svc_key, embedding_service
                 )
-        schema_context = await build_chat_knowledge_context(
+        raw_context = await build_chat_knowledge_context(
             source_id=selected_source_id,
             user_message=body.user_message,
             embedding_service=embedding_service,
             vector_store=getattr(app.state, "vector_store", None),
         )
+        schema_context, retrieval_trace = _unpack_knowledge_context(raw_context)
+        trace_id_val = getattr(request.state, "trace_id", None)
         result = await orch.chat(
             conversation_id=body.conversation_id,
             user_message=body.user_message,
@@ -353,16 +388,19 @@ def create_app(
             preferred_source_id=selected_source_id,
             schema_context=schema_context,
         )
+        trace_val = _build_trace(retrieval_trace=retrieval_trace, result=result)
         logger.info(
             "chat_request_completed",
             extra={
-                "trace_id": getattr(request.state, "trace_id", None),
+                "trace_id": trace_id_val,
                 "conversation_id": body.conversation_id,
             },
         )
         return ChatResponse(
             assistant_content=result["assistant_content"],
             tool_outputs=result["tool_outputs"],
+            trace_id=trace_id_val,
+            trace=trace_val,
         )
 
     @app.post("/api/vanna/v2/chat_poll")
@@ -388,32 +426,38 @@ def create_app(
                 embedding_service = getattr(app.state, "embedding_services", {}).get(
                     svc_key, embedding_service
                 )
-        schema_context = await build_chat_knowledge_context(
+        raw_context = await build_chat_knowledge_context(
             source_id=selected_source_id,
             user_message=user_message,
             embedding_service=embedding_service,
             vector_store=getattr(app.state, "vector_store", None),
         )
-
+        schema_context, retrieval_trace = _unpack_knowledge_context(raw_context)
+        trace_id_val = getattr(request.state, "trace_id", None)
         result = await orch.chat(
             conversation_id=conversation_id,
             user_message=user_message,
             user_id=None,
             preferred_source_id=selected_source_id,
             schema_context=schema_context,
+            trace_id=trace_id_val,
         )
+        trace_val = _build_trace(retrieval_trace=retrieval_trace, result=result)
         chunk = _build_simple_chunk(
             text=result["assistant_content"],
             conversation_id=conversation_id,
             request_id=request_id,
         )
-        return JSONResponse(
-            {
-                "conversation_id": conversation_id,
-                "request_id": request_id,
-                "chunks": [chunk],
-            }
-        )
+        payload: dict = {
+            "conversation_id": conversation_id,
+            "request_id": request_id,
+            "chunks": [chunk],
+        }
+        if trace_val is not None:
+            payload["trace"] = trace_val
+        if trace_id_val is not None:
+            payload["trace_id"] = trace_id_val
+        return JSONResponse(payload)
 
     @app.post("/api/vanna/v2/chat_sse")
     async def legacy_chat_sse(
@@ -438,24 +482,28 @@ def create_app(
                 embedding_service = getattr(app.state, "embedding_services", {}).get(
                     svc_key, embedding_service
                 )
-        schema_context = await build_chat_knowledge_context(
+        raw_context = await build_chat_knowledge_context(
             source_id=selected_source_id,
             user_message=user_message,
             embedding_service=embedding_service,
             vector_store=getattr(app.state, "vector_store", None),
         )
-
+        schema_context, retrieval_trace = _unpack_knowledge_context(raw_context)
+        trace_id_val = getattr(request.state, "trace_id", None)
         result = await orch.chat(
             conversation_id=conversation_id,
             user_message=user_message,
             user_id=None,
             preferred_source_id=selected_source_id,
             schema_context=schema_context,
+            trace_id=trace_id_val,
         )
+        trace_val = _build_trace(retrieval_trace=retrieval_trace, result=result)
         chunk = _build_simple_chunk(
             text=result["assistant_content"],
             conversation_id=conversation_id,
             request_id=request_id,
+            debug=trace_val,
         )
 
         async def event_stream():

@@ -37,6 +37,7 @@ class Orchestrator:
         user_id: str | None = None,
         preferred_source_id: str | None = None,
         schema_context: str | None = None,
+        trace_id: str | None = None,
     ) -> Dict[str, object]:
         await self._conversation_store.append_message(
             conversation_id=conversation_id,
@@ -49,6 +50,7 @@ class Orchestrator:
                 "conversation_id": conversation_id,
                 "user_id": user_id or "anonymous",
                 "user_message_len": len(user_message),
+                "trace_id": trace_id,
             },
         )
 
@@ -63,8 +65,15 @@ class Orchestrator:
             for msg in history
         ]
         tool_outputs: List[str] = []
+        llm_rounds: List[Dict[str, object]] = []
+        tool_results: List[Dict[str, object]] = []
         assistant_content = ""
         iteration = 0
+
+        def _truncate_content(text: str, max_len: int = 2000) -> str:
+            if not text:
+                return ""
+            return text[:max_len] + ("..." if len(text) > max_len else "")
 
         while iteration < self._max_tool_iterations:
             try:
@@ -90,12 +99,26 @@ class Orchestrator:
                         "tool_calls_count": len(tool_outputs),
                         "final": True,
                         "llm_error": type(e).__name__,
+                        "trace_id": trace_id,
                     },
                 )
                 return {
                     "assistant_content": f"{LLM_ERROR_MESSAGE} ({type(e).__name__}: {e!s})",
                     "tool_outputs": tool_outputs,
+                    "llm_rounds": llm_rounds,
+                    "tool_results": tool_results,
                 }
+
+            tool_calls_list = [
+                {"name": tc.name, "arguments": tc.arguments} for tc in (response.tool_calls or [])
+            ]
+            is_final = not response.tool_calls
+            llm_rounds.append({
+                "iteration": iteration,
+                "assistant_content": response.content or "",
+                "tool_calls": tool_calls_list,
+                "is_final": is_final,
+            })
 
             if not response.tool_calls:
                 assistant_content = response.content or ""
@@ -107,6 +130,7 @@ class Orchestrator:
                         "iteration": iteration,
                         "tool_calls_count": 0,
                         "final": True,
+                        "trace_id": trace_id,
                     },
                 )
                 break
@@ -121,6 +145,7 @@ class Orchestrator:
                     "iteration": iteration,
                     "tool_calls": tool_names,
                     "tool_calls_count": len(tool_names),
+                    "trace_id": trace_id,
                 },
             )
             assistant_msg = LlmMessage(
@@ -155,9 +180,23 @@ class Orchestrator:
                         context=context,
                     )
                     output = result.content
+                    tool_results.append({
+                        "tool_name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                        "content": _truncate_content(result.content or ""),
+                        "metadata_summary": result.metadata if result.metadata else None,
+                        "error": None,
+                    })
                 except Exception as e:  # noqa: BLE001
                     logger.exception("Tool %s failed: %s", tool_call.name, e)
                     output = f"{TOOL_ERROR_PREFIX}{type(e).__name__}: {e!s}"
+                    tool_results.append({
+                        "tool_name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                        "content": _truncate_content(output),
+                        "metadata_summary": None,
+                        "error": f"{type(e).__name__}: {e!s}",
+                    })
                 tool_outputs.append(output)
                 llm_messages.append(
                     LlmMessage(
@@ -188,6 +227,7 @@ class Orchestrator:
                     "tool_calls_count": len(tool_outputs),
                     "final": True,
                     "truncated": True,
+                    "trace_id": trace_id,
                 },
             )
 
@@ -200,6 +240,8 @@ class Orchestrator:
         return {
             "assistant_content": assistant_content,
             "tool_outputs": tool_outputs,
+            "llm_rounds": llm_rounds,
+            "tool_results": tool_results,
         }
 
     @staticmethod
@@ -228,6 +270,8 @@ class Orchestrator:
                 f"Use source_id='{preferred_source_id}' as the default data source for SQL. "
             )
         if schema_context:
+            # schema_context 由 build_chat_knowledge_context 生成，已为结构化格式
+            # （含 ## Candidate Tables / ## Recommended Join Paths / ## Domain Hints / ## SQL Constraints）
             base += f"Use the following schema context to generate accurate SQL. {schema_context} "
         base += (
             "Do not run table/schema exploration unless the user explicitly asks for metadata. "
